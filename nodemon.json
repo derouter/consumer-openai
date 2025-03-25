@@ -1,0 +1,9 @@
+{
+  "watch": [
+    "src",
+    "package.json",
+    "tsconfig.json"
+  ],
+  "ext": "*",
+  "exec": "npm run build && npm start"
+}

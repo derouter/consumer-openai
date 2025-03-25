@@ -1,0 +1,44 @@
+{
+  "name": "@derouter/consumer-openai",
+  "version": "0.1.0",
+  "description": "A simple OpenAI consumer for DeRouter protocol",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "nodemon"
+  },
+  "engines": {
+    "node": "23",
+    "npm": "10"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/derouter/consumer-openai.git"
+  },
+  "keywords": [
+    "derouter",
+    "derouter-consumer",
+    "openai"
+  ],
+  "author": "derouter.org",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/derouter/consumer-openai/issues"
+  },
+  "homepage": "https://github.com/derouter/consumer-openai#readme",
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.13.11",
+    "nodemon": "^3.1.9",
+    "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "@derouter/consumer": "file:../consumer",
+    "express": "^5.0.1",
+    "json5": "^2.2.3",
+    "valibot": "^1.0.0"
+  }
+}
