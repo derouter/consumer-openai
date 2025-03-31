@@ -424,7 +424,6 @@ class OpenAiConsumer extends Consumer {
             // They accuse us of protocol violation, but we're honest.
             //
 
-            // TODO: Report protocol error.
             console.warn(
               `Provider accused us of protocol violation`,
               prologue.message,
@@ -440,7 +439,6 @@ class OpenAiConsumer extends Consumer {
           }
 
           case "ServiceError":
-            // TODO: Report service error.
             console.log(
               `Provider responded with service error`,
               prologue.message,
@@ -650,9 +648,18 @@ class OpenAiConsumer extends Consumer {
               }
 
               case undefined:
-                // TODO: Report service error.
                 console.warn("Provider closed stream prematurely");
-                res.end();
+
+                await this.failJob({
+                  database_job_id,
+                  reason: `Provider closed stream prematurely`,
+                  reason_class: FailureReason.ServiceError,
+                  private_payload: JSON.stringify({
+                    request: body,
+                    response: chunks,
+                  }),
+                });
+
                 return;
 
               default:
@@ -665,19 +672,32 @@ class OpenAiConsumer extends Consumer {
           const responseCbor = await readCborOnce(connection.stream);
 
           if (responseCbor === undefined) {
-            // TODO: Report service error.
             console.warn("Provider did not respond");
+
+            await this.failJob({
+              database_job_id,
+              reason: `Provider did not respond`,
+              reason_class: FailureReason.ServiceError,
+            });
+
             continue offerSnapshotLoop;
           }
 
           const completion = v.safeParse(responseSchema, responseCbor);
 
           if (!completion.success) {
-            // TODO: Report protocol error.
             console.warn(
               "Provider sent invalid completion object",
               v.flatten(completion.issues),
             );
+
+            await this.failJob({
+              database_job_id,
+              reason: `Provider sent invalid completion object: ${JSON.stringify(
+                v.flatten(completion.issues),
+              )}`,
+              reason_class: FailureReason.ProtocolViolation,
+            });
 
             continue offerSnapshotLoop;
           }
