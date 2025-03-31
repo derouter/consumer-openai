@@ -30,3 +30,18 @@ export function formatEther(value: bignumber.BigNumber): string {
 export function parseWeiToEth(value: string): number {
   return parseFloat(formatEther(bignumber.BigNumber.from(value)));
 }
+
+/**
+ * Returns a new object with entries sorted by key.
+ */
+export function sortByKey<T extends { [key: string]: any }>(
+  obj: T,
+  compareFn?: (a: string, b: string) => number,
+): T {
+  return Object.keys(obj)
+    .sort(compareFn)
+    .reduce((acc, key) => {
+      (acc as any)[key] = obj[key];
+      return acc;
+    }, {} as T);
+}

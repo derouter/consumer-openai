@@ -17,7 +17,7 @@ import * as fs from "node:fs";
 import { Duplex } from "node:stream";
 import { parseArgs } from "node:util";
 import * as v from "valibot";
-import { d } from "./lib/drizzle.js";
+import { d, dbMigrated } from "./lib/drizzle.js";
 import { parseWeiToEth } from "./lib/util.js";
 
 enum FailureReason {
@@ -858,7 +858,9 @@ class OpenAiConsumer extends Consumer {
   }
 }
 
-new OpenAiConsumer({}, config.rpc.host, config.rpc.port).run();
+dbMigrated.promise.then(() => {
+  new OpenAiConsumer({}, config.rpc.host, config.rpc.port).run();
+});
 
 function validatateCompletionsPublicPayload(
   publicPayloadString: string,

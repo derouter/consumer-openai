@@ -30,7 +30,6 @@
   },
   "homepage": "https://github.com/derouter/consumer-openai#readme",
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
     "@types/body-parser": "^1.19.5",
     "@types/express": "^5.0.1",
     "@types/node": "^22.13.11",
@@ -45,7 +44,6 @@
     "@derouter/consumer": "file:../consumer",
     "@derouter/protocol-openai": "file:../protocol-openai",
     "@ethersproject/bignumber": "^5.8.0",
-    "better-sqlite3": "^11.9.1",
     "body-parser": "^2.2.0",
     "cbor2": "^1.12.0",
     "drizzle-orm": "^0.41.0",

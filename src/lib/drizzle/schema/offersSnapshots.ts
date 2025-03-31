@@ -8,12 +8,13 @@ import {
   text,
   unique,
 } from "drizzle-orm/sqlite-core";
+import { sortByKey } from "../../util.js";
 import { activeServiceConnections } from "./activeServiceConnections.js";
 import { providers } from "./providers.js";
 
 export const offerSnapshots = sqliteTable(
   "offer_snapshots",
-  {
+  sortByKey({
     /**
      * The offer snapshot ID as set by the backend.
      */
@@ -76,7 +77,7 @@ export const offerSnapshots = sqliteTable(
      * Extracted from {@link protocolPayload} for indexing, in eth.
      */
     outputTokenPricePol: real("output_token_price_pol").notNull(),
-  },
+  }),
   (t) => [
     unique("idx_offer_snapshots_unique").on(
       t.providerPeerId,
