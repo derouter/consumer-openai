@@ -7,10 +7,11 @@ import {
   ProviderUpdatedData,
 } from "@derouter/consumer";
 import { readCborOnce, unreachable, writeCbor } from "@derouter/consumer/util";
-import * as openaiProtocol from "@derouter/protocol-openai";
+import * as openai from "@derouter/protocol-openai";
 import bodyParser from "body-parser";
 import { and, eq, gt, gte, lte, or, sql } from "drizzle-orm";
 import express, { Request, Response } from "express";
+import deepEqual from "fast-deep-equal";
 import json5 from "json5";
 import * as fs from "node:fs";
 import { Duplex } from "node:stream";
@@ -18,6 +19,15 @@ import { parseArgs } from "node:util";
 import * as v from "valibot";
 import { d } from "./lib/drizzle.js";
 import { parseWeiToEth } from "./lib/util.js";
+
+enum FailureReason {
+  ProtocolViolation,
+  ServiceError,
+}
+
+enum Currency {
+  Polygon,
+}
 
 const PriceSchema = v.object({
   $pol: v.pipe(
@@ -117,9 +127,9 @@ class OpenAiConsumer extends Consumer {
       this._completionImpl(
         req,
         res,
-        openaiProtocol.completions.RequestBodySchema,
-        openaiProtocol.completions.ChunkSchema,
-        openaiProtocol.completions.ResponseSchema,
+        openai.completions.RequestBodySchema,
+        openai.completions.CompletionChunkSchema,
+        openai.completions.ResponseSchema,
       );
     });
 
@@ -127,9 +137,9 @@ class OpenAiConsumer extends Consumer {
       this._completionImpl(
         req,
         res,
-        openaiProtocol.chatCompletions.RequestBodySchema,
-        openaiProtocol.chatCompletions.ChunkSchema,
-        openaiProtocol.chatCompletions.ResponseSchema,
+        openai.chatCompletions.RequestBodySchema,
+        openai.chatCompletions.CompletionChunkSchema,
+        openai.chatCompletions.ResponseSchema,
       );
     });
 
@@ -173,13 +183,13 @@ class OpenAiConsumer extends Consumer {
     console.debug("onOfferUpdated", data);
 
     await d.db.transaction(async (tx) => {
-      if (data.protocol_id !== openaiProtocol.ProtocolId) {
+      if (data.protocol_id !== openai.ProtocolId) {
         console.debug("Skipped offer with protocol", data.protocol_id);
         return;
       }
 
       const parseResult = v.safeParse(
-        openaiProtocol.OfferPayloadSchema,
+        openai.OfferPayloadSchema,
         data.protocol_payload,
       );
 
@@ -247,7 +257,7 @@ class OpenAiConsumer extends Consumer {
   }
 
   async onOfferRemoved(data: OfferRemovedData) {
-    if (data.protocol_id !== openaiProtocol.ProtocolId) {
+    if (data.protocol_id !== openai.ProtocolId) {
       console.debug("Skipped offer with protocol", data.protocol_id);
       return;
     }
@@ -270,14 +280,14 @@ class OpenAiConsumer extends Consumer {
     req: Request,
     res: Response,
     requestBodySchema:
-      | typeof openaiProtocol.completions.RequestBodySchema
-      | typeof openaiProtocol.chatCompletions.RequestBodySchema,
+      | typeof openai.completions.RequestBodySchema
+      | typeof openai.chatCompletions.RequestBodySchema,
     chunkSchema:
-      | typeof openaiProtocol.completions.ChunkSchema
-      | typeof openaiProtocol.chatCompletions.ChunkSchema,
+      | typeof openai.completions.CompletionChunkSchema
+      | typeof openai.chatCompletions.CompletionChunkSchema,
     responseSchema:
-      | typeof openaiProtocol.completions.ResponseSchema
-      | typeof openaiProtocol.chatCompletions.ResponseSchema,
+      | typeof openai.completions.ResponseSchema
+      | typeof openai.chatCompletions.ResponseSchema,
   ): Promise<void> {
     const parseResult = v.safeParse(requestBodySchema, req.body);
 
@@ -306,6 +316,7 @@ class OpenAiConsumer extends Consumer {
           activeServiceConnectionsCount: sql<number>`
             cast(count(${d.activeServiceConnections.id}) AS INT)
           `,
+          payload: d.offerSnapshots.protocolPayload,
         })
         .from(d.offerSnapshots)
         .where(
@@ -347,7 +358,6 @@ class OpenAiConsumer extends Consumer {
     }
 
     offerSnapshotLoop: for (const offerSnapshot of offerSnapshots) {
-      // FIXME: Reusing connection of a dead provider.
       let connection = this._connectionPools.get(offerSnapshot.id)?.shift();
 
       if (connection) {
@@ -356,9 +366,10 @@ class OpenAiConsumer extends Consumer {
         console.debug(`Opening new connection for ${offerSnapshot.id}...`);
 
         try {
-          // TODO: Timeout.
+          // BUG: Shall handle timeout.
           const result = await this.openConnection({
             offer_snapshot_id: offerSnapshot.id,
+            currency: Currency.Polygon,
           });
 
           connection = {
@@ -370,6 +381,8 @@ class OpenAiConsumer extends Consumer {
             connectionId: connection.connectionId,
           });
         } catch (e) {
+          // BUG: Shall save the error for future reference
+          // (e.g. to block the provider).
           if (e instanceof OpenConnectionError) {
             console.error(e.message);
             continue offerSnapshotLoop;
@@ -380,18 +393,24 @@ class OpenAiConsumer extends Consumer {
       }
 
       try {
+        const { database_job_id } = await this.createJob({
+          connection_id: connection.connectionId,
+          private_payload: JSON.stringify({ request: body }),
+        });
+
         console.debug("Writing body to the stream...");
         await writeCbor(connection.stream, body);
 
-        // TODO: Timeout.
+        // BUG: Shall handle timeout.
         console.debug("Waiting for prologue...");
-        const prologue = await readCborOnce<openaiProtocol.ResponsePrologue>(
+        const prologue = await readCborOnce<openai.ResponsePrologue>(
           connection.stream,
         );
         console.debug("Read prologue", prologue);
 
         if (!prologue) {
           // TODO: Report service error.
+          // NOTE: We don't even have a job ID at this point...
           console.warn(`Could not read prologue`);
           continue offerSnapshotLoop;
         }
@@ -411,6 +430,12 @@ class OpenAiConsumer extends Consumer {
               prologue.message,
             );
 
+            await this.failJob({
+              database_job_id,
+              reason: `They accused us of protocol violation: ${prologue.message}`,
+              reason_class: FailureReason.ProtocolViolation,
+            });
+
             continue offerSnapshotLoop;
           }
 
@@ -421,11 +446,29 @@ class OpenAiConsumer extends Consumer {
               prologue.message,
             );
 
+            await this.failJob({
+              database_job_id,
+              reason: prologue.message ?? "Service error",
+              reason_class: FailureReason.ServiceError,
+            });
+
             continue offerSnapshotLoop;
 
           default:
             throw unreachable(prologue);
         }
+
+        console.debug("this.syncJob()...", {
+          database_job_id,
+          provider_job_id: prologue.provider_job_id,
+          created_at_sync: prologue.created_at_sync,
+        });
+
+        await this.syncJob({
+          database_job_id,
+          provider_job_id: prologue.provider_job_id,
+          created_at_sync: prologue.created_at_sync,
+        });
 
         if (body.stream) {
           // By protocol, provider sends us CBOR objects.
@@ -434,13 +477,18 @@ class OpenAiConsumer extends Consumer {
 
           res.header("Content-Type", "text/event-stream");
 
+          const chunks: (
+            | openai.completions.CompletionChunk
+            | openai.chatCompletions.CompletionChunk
+          )[] = [];
+          let usage;
+
           while (true) {
-            // TODO: Timeout.
+            // BUG: Shall handle timeout.
             console.debug("Waiting for stream chunk...");
 
             const streamChunk = await readCborOnce<
-              | openaiProtocol.CompletionsStreamChunk
-              | openaiProtocol.ChatCompletionsStreamChunk
+              openai.completions.Chunk | openai.chatCompletions.Chunk
             >(connection.stream);
 
             console.debug("streamChunk", streamChunk);
@@ -451,14 +499,30 @@ class OpenAiConsumer extends Consumer {
                 const openaiChunk = v.safeParse(chunkSchema, streamChunk);
 
                 if (!openaiChunk.success) {
-                  // TODO: Report protocol error.
                   console.warn(
-                    "Invalid OpenAI stream chunk",
+                    "[Protocol] Invalid OpenAI stream chunk",
                     v.flatten(openaiChunk.issues),
                   );
 
+                  await this.failJob({
+                    database_job_id,
+                    reason: `Invalid OpenAI stream chunk: ${JSON.stringify(
+                      v.flatten(openaiChunk.issues),
+                    )}`,
+                    reason_class: FailureReason.ProtocolViolation,
+                  });
+
+                  res.write(`event:\ndata: [DONE]\n\n`);
+                  res.end();
+
                   return;
                 }
+
+                if (openaiChunk.output.usage) {
+                  usage = openaiChunk.output.usage;
+                }
+
+                chunks.push(openaiChunk.output);
 
                 res.write(
                   `event:\ndata: ${JSON.stringify(openaiChunk.output)}\n\n`,
@@ -467,18 +531,123 @@ class OpenAiConsumer extends Consumer {
                 break;
               }
 
-              case "derouter.epilogue":
-                console.log(
-                  `✅ Received completion (${
-                    streamChunk.balanceDelta
-                      ? `$POL ~${parseWeiToEth(streamChunk.balanceDelta)}`
-                      : "free"
-                  })`,
-                );
+              case "derouter.epilogue": {
+                // Check usage.
+                //
 
                 res.write(`event:\ndata: [DONE]\n\n`);
                 res.end();
-                return;
+
+                if (!usage) {
+                  console.warn("[Protocol] Missing usage in the response");
+
+                  await this.failJob({
+                    database_job_id,
+                    reason: `Usage is missing`,
+                    reason_class: FailureReason.ProtocolViolation,
+                    private_payload: JSON.stringify({
+                      request: body,
+                      response: chunks,
+                    }),
+                  });
+
+                  return;
+                }
+
+                // Check balance delta.
+                //
+
+                const balanceDelta = openai.calcCost(
+                  offerSnapshot.payload,
+                  usage,
+                );
+
+                if (balanceDelta !== streamChunk.balance_delta) {
+                  console.warn("[Protocol] Balance delta mismatch", {
+                    ours: balanceDelta,
+                    their: streamChunk.balance_delta,
+                  });
+
+                  await this.failJob({
+                    database_job_id,
+                    reason: `Balance delta mismatch (ours: ${
+                      balanceDelta
+                    }, their: ${streamChunk.balance_delta})`,
+                    reason_class: FailureReason.ProtocolViolation,
+                    private_payload: JSON.stringify({
+                      request: body,
+                      response: chunks,
+                    }),
+                  });
+
+                  return;
+                }
+
+                // Check public payload.
+                //
+
+                const publicPayloadError =
+                  "prompt" in body
+                    ? validatateCompletionsPublicPayload(
+                        streamChunk.public_payload,
+                        body,
+                        usage,
+                      )
+                    : validatateChatCompletionsPublicPayload(
+                        streamChunk.public_payload,
+                        body,
+                        usage,
+                      );
+
+                if (publicPayloadError) {
+                  console.warn(
+                    `[Protocol] Public payload validation failed: ${
+                      publicPayloadError
+                    }`,
+                  );
+
+                  await this.failJob({
+                    database_job_id,
+                    reason: `Invalid public payload (${publicPayloadError})`,
+                    reason_class: FailureReason.ProtocolViolation,
+                    private_payload: JSON.stringify({
+                      request: body,
+                      response: chunks,
+                    }),
+                  });
+
+                  return;
+                }
+
+                // Success!
+                //
+
+                await this.completeJob({
+                  balance_delta: streamChunk.balance_delta,
+                  database_job_id,
+                  public_payload: streamChunk.public_payload,
+                  completed_at_sync: streamChunk.completed_at_sync,
+                  private_payload: JSON.stringify({
+                    request: body,
+                    response: chunks,
+                  }),
+                });
+
+                // NOTE: It may take long time.
+                // TODO: Allow confirming directly via current connection.
+                // BUG: Catch `ProviderUnreacheable` error.
+                await this.confirmJobCompletion({
+                  database_job_id,
+                });
+
+                console.log(
+                  `✅ Received completion (${
+                    streamChunk.balance_delta
+                      ? `$POL ~${parseWeiToEth(streamChunk.balance_delta)}`
+                      : "free"
+                  })`,
+                );
+              }
 
               case undefined:
                 // TODO: Report service error.
@@ -513,33 +682,139 @@ class OpenAiConsumer extends Consumer {
             continue offerSnapshotLoop;
           }
 
-          console.log("✅ Received completion", completion.output);
-
-          if (completion.output.usage) {
-          } else {
-            // TODO: Report protocol error.
-            console.warn("Missing usage in response");
-          }
-
-          const epilogueCbor =
-            await readCborOnce<openaiProtocol.NonStreamingResponseEpilogue>(
-              connection.stream,
-            );
-
-          if (!epilogueCbor) {
-            // TODO: Report protocol error.
-            console.warn("Missing usage in response");
-          } else {
-            console.log(
-              `✅ Received completion (${
-                epilogueCbor.balanceDelta
-                  ? `$POL ~${parseWeiToEth(epilogueCbor.balanceDelta)}`
-                  : "free"
-              })`,
-            );
-          }
-
+          console.debug(completion.output);
           res.status(201).json(completion.output);
+
+          // Check usage.
+          //
+
+          if (!completion.output.usage) {
+            console.warn("[Protocol] Missing usage in the response");
+
+            await this.failJob({
+              database_job_id,
+              reason: `Usage is missing`,
+              reason_class: FailureReason.ProtocolViolation,
+              private_payload: JSON.stringify({
+                request: body,
+                response: completion.output,
+              }),
+            });
+
+            return;
+          }
+
+          const epilogue = await readCborOnce<
+            openai.completions.Epilogue | openai.chatCompletions.Epilogue
+          >(connection.stream);
+
+          if (!epilogue) {
+            console.warn("[Protocol] Missing epilogue");
+
+            await this.failJob({
+              database_job_id,
+              reason: `Epilogue is missing`,
+              reason_class: FailureReason.ProtocolViolation,
+              private_payload: JSON.stringify({
+                request: body,
+                response: completion.output,
+              }),
+            });
+
+            return;
+          }
+
+          // Check balance delta.
+          //
+
+          const balanceDelta = openai.calcCost(
+            offerSnapshot.payload,
+            completion.output.usage,
+          );
+
+          if (balanceDelta !== epilogue.balance_delta) {
+            console.warn("[Protocol] Balance delta mismatch", {
+              ours: balanceDelta,
+              their: epilogue.balance_delta,
+            });
+
+            await this.failJob({
+              database_job_id,
+              reason: `Balance delta mismatch (ours: ${
+                balanceDelta
+              }, their: ${epilogue.balance_delta})`,
+              reason_class: FailureReason.ProtocolViolation,
+              private_payload: JSON.stringify({
+                request: body,
+                response: completion.output,
+              }),
+            });
+
+            return;
+          }
+
+          // Check public payload.
+          //
+
+          const publicPayloadError =
+            "prompt" in body
+              ? validatateCompletionsPublicPayload(
+                  epilogue.public_payload,
+                  body,
+                  completion.output.usage,
+                )
+              : validatateChatCompletionsPublicPayload(
+                  epilogue.public_payload,
+                  body,
+                  completion.output.usage,
+                );
+
+          if (publicPayloadError) {
+            console.warn(
+              `[Protocol] Public payload validation failed: ${
+                publicPayloadError
+              }`,
+            );
+
+            await this.failJob({
+              database_job_id,
+              reason: `Invalid public payload (${publicPayloadError})`,
+              reason_class: FailureReason.ProtocolViolation,
+              private_payload: JSON.stringify({
+                request: body,
+                response: completion.output,
+              }),
+            });
+
+            return;
+          }
+
+          await this.completeJob({
+            database_job_id,
+            balance_delta: epilogue.balance_delta,
+            public_payload: epilogue.public_payload,
+            completed_at_sync: epilogue.completed_at_sync,
+            private_payload: JSON.stringify({
+              request: body,
+              response: completion.output,
+            }),
+          });
+
+          // NOTE: It may take long time.
+          // TODO: Allow confirming directly via current connection.
+          // BUG: Catch `ProviderUnreacheable` error.
+          await this.confirmJobCompletion({
+            database_job_id,
+          });
+
+          console.log(
+            `✅ Received completion (${
+              epilogue.balance_delta
+                ? `$POL ~${parseWeiToEth(epilogue.balance_delta)}`
+                : "free"
+            })`,
+          );
+
           return;
         }
       } catch (e) {
@@ -562,3 +837,129 @@ class OpenAiConsumer extends Consumer {
 }
 
 new OpenAiConsumer({}, config.rpc.host, config.rpc.port).run();
+
+function validatateCompletionsPublicPayload(
+  publicPayloadString: string,
+  body: openai.completions.RequestBody,
+  usage: openai.Usage,
+): string | null {
+  let json;
+
+  try {
+    json = JSON.parse(publicPayloadString);
+  } catch (e: any) {
+    console.warn(
+      "[Protocol] Failed to parse public payload JSON string",
+      e.message,
+    );
+
+    return `JSON parsing failed: ${e.message}`;
+  }
+
+  const parseResult = v.safeParse(
+    openai.completions.PublicJobPayloadSchema,
+    json,
+  );
+
+  if (!parseResult.success) {
+    console.warn(
+      "[Protocol] Failed to parse public payload object",
+      v.flatten(parseResult.issues),
+    );
+
+    return `Payload parsing failed: ${v.flatten(parseResult.issues)}`;
+  }
+
+  const publicPayload = parseResult.output;
+
+  if (publicPayload.request.frequency_penalty !== body.frequency_penalty) {
+    return `Payload mismatch: request.frequency_penalty (${publicPayload.request.frequency_penalty})`;
+  } else if (publicPayload.request.max_tokens !== body.max_tokens) {
+    return `Payload mismatch: request.max_tokens (${publicPayload.request.max_tokens})`;
+  } else if (publicPayload.request.model !== body.model) {
+    return `Payload mismatch: request.model (${publicPayload.request.max_tokens})`;
+  } else if (publicPayload.request.n !== body.n) {
+    return `Payload mismatch: request.n (${publicPayload.request.n})`;
+  } else if (publicPayload.request.presence_penalty !== body.presence_penalty) {
+    return `Payload mismatch: request.presence_penalty (${publicPayload.request.presence_penalty})`;
+  } else if (publicPayload.request.stream !== body.stream) {
+    return `Payload mismatch: request.stream (${publicPayload.request.stream})`;
+  } else if (publicPayload.request.temperature !== body.temperature) {
+    return `Payload mismatch: request.temperature (${publicPayload.request.temperature})`;
+  } else if (publicPayload.request.top_p !== body.top_p) {
+    return `Payload mismatch: request.top_p (${publicPayload.request.top_p})`;
+  }
+
+  if (!deepEqual(publicPayload.response.usage, usage)) {
+    return `Payload mismatch: response.usage (${publicPayload.response.usage})`;
+  }
+
+  return null;
+}
+
+function validatateChatCompletionsPublicPayload(
+  publicPayloadString: string,
+  body: openai.chatCompletions.RequestBody,
+  usage: openai.Usage,
+): string | null {
+  let json;
+
+  try {
+    json = JSON.parse(publicPayloadString);
+  } catch (e: any) {
+    console.warn(
+      "[Protocol] Failed to parse public payload JSON string",
+      e.message,
+    );
+
+    return `JSON parsing failed: ${e.message}`;
+  }
+
+  const parseResult = v.safeParse(
+    openai.chatCompletions.PublicJobPayloadSchema,
+    json,
+  );
+
+  if (!parseResult.success) {
+    console.warn(
+      "[Protocol] Failed to parse public payload object",
+      v.flatten(parseResult.issues),
+    );
+
+    return `Payload parsing failed: ${v.flatten(parseResult.issues)}`;
+  }
+
+  const publicPayload = parseResult.output;
+
+  if (publicPayload.request.frequency_penalty !== body.frequency_penalty) {
+    return `Payload mismatch: request.frequency_penalty (${publicPayload.request.frequency_penalty})`;
+  } else if (publicPayload.request.max_tokens !== body.max_tokens) {
+    return `Payload mismatch: request.max_tokens (${publicPayload.request.max_tokens})`;
+  } else if (publicPayload.request.model !== body.model) {
+    return `Payload mismatch: request.model (${publicPayload.request.max_tokens})`;
+  } else if (publicPayload.request.n !== body.n) {
+    return `Payload mismatch: request.n (${publicPayload.request.n})`;
+  } else if (publicPayload.request.presence_penalty !== body.presence_penalty) {
+    return `Payload mismatch: request.presence_penalty (${publicPayload.request.presence_penalty})`;
+  } else if (publicPayload.request.stream !== body.stream) {
+    return `Payload mismatch: request.stream (${publicPayload.request.stream})`;
+  } else if (publicPayload.request.temperature !== body.temperature) {
+    return `Payload mismatch: request.temperature (${publicPayload.request.temperature})`;
+  } else if (publicPayload.request.top_p !== body.top_p) {
+    return `Payload mismatch: request.top_p (${publicPayload.request.top_p})`;
+  } else if (
+    publicPayload.request.max_completion_tokens !== body.max_completion_tokens
+  ) {
+    return `Payload mismatch: request.max_completion_tokens (${publicPayload.request.max_completion_tokens})`;
+  } else if (publicPayload.request.reasoning_effort !== body.reasoning_effort) {
+    return `Payload mismatch: request.reasoning_effort (${publicPayload.request.reasoning_effort})`;
+  } else if (publicPayload.request.response_format !== body.response_format) {
+    return `Payload mismatch: request.response_format (${publicPayload.request.response_format})`;
+  }
+
+  if (!deepEqual(publicPayload.response.usage, usage)) {
+    return `Payload mismatch: response.usage`;
+  }
+
+  return null;
+}
