@@ -645,6 +645,8 @@ class OpenAiConsumer extends Consumer {
                       : "free"
                   })`,
                 );
+
+                return;
               }
 
               case undefined:
