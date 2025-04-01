@@ -1,16 +1,17 @@
-import {
-  Consumer,
-  OfferRemovedData,
-  OfferUpdatedData,
-  OpenConnectionError,
-  ProviderHeartbeatData,
-  ProviderUpdatedData,
-} from "@derouter/consumer";
-import { readCborOnce, unreachable, writeCbor } from "@derouter/consumer/util";
 import * as openai from "@derouter/protocol-openai";
+import {
+  Auth,
+  ConsumerOpenConnectionError,
+  RPC,
+  type OfferRemovedData,
+  type OfferUpdatedData,
+  type ProviderHeartbeatData,
+  type ProviderUpdatedData,
+} from "@derouter/rpc";
+import { readCborOnce, unreachable, writeCbor } from "@derouter/rpc/util";
 import bodyParser from "body-parser";
 import { and, eq, gt, gte, lte, or, sql } from "drizzle-orm";
-import express, { Request, Response } from "express";
+import express, { type Request, type Response } from "express";
 import deepEqual from "fast-deep-equal";
 import json5 from "json5";
 import * as fs from "node:fs";
@@ -113,10 +114,22 @@ type Connection = {
   stream: Duplex;
 };
 
-class OpenAiConsumer extends Consumer {
+class OpenAiConsumer {
   private _connectionPools = new Map<number, Connection[]>();
+  private _rpc: RPC;
 
-  async run() {
+  constructor(config: v.InferOutput<typeof ConfigSchema>) {
+    this._rpc = new RPC(config.rpc.host, config.rpc.port, Auth.Consumer);
+    this._rpc.emitter.on("providerUpdated", (e) => this.onProviderUpdated(e));
+    this._rpc.emitter.on("providerHeartbeat", (e) =>
+      this.onProviderHeartbeat(e),
+    );
+    this._rpc.emitter.on("offerUpdated", (e) => this.onOfferUpdated(e));
+    this._rpc.emitter.on("offerRemoved", (e) => this.onOfferRemoved(e));
+    this._rpc.consumerConfig({}).then(() => this.run());
+  }
+
+  private async run() {
     const app = express();
 
     app.get("/", (req, res) => {
@@ -148,8 +161,6 @@ class OpenAiConsumer extends Consumer {
         `Server listening on http://${config.server.host}:${config.server.port}`,
       );
     });
-
-    await this.loop();
   }
 
   async onProviderUpdated(data: ProviderUpdatedData) {
@@ -367,7 +378,7 @@ class OpenAiConsumer extends Consumer {
 
         try {
           // BUG: Shall handle timeout.
-          const result = await this.openConnection({
+          const result = await this._rpc.consumerOpenConnection({
             offer_snapshot_id: offerSnapshot.id,
             currency: Currency.Polygon,
           });
@@ -383,7 +394,7 @@ class OpenAiConsumer extends Consumer {
         } catch (e) {
           // BUG: Shall save the error for future reference
           // (e.g. to block the provider).
-          if (e instanceof OpenConnectionError) {
+          if (e instanceof ConsumerOpenConnectionError) {
             console.error(e.message);
             continue offerSnapshotLoop;
           } else {
@@ -393,7 +404,7 @@ class OpenAiConsumer extends Consumer {
       }
 
       try {
-        const { database_job_id } = await this.createJob({
+        const { database_job_id } = await this._rpc.consumerCreateJob({
           connection_id: connection.connectionId,
           private_payload: JSON.stringify({ request: body }),
         });
@@ -429,7 +440,7 @@ class OpenAiConsumer extends Consumer {
               prologue.message,
             );
 
-            await this.failJob({
+            await this._rpc.consumerFailJob({
               database_job_id,
               reason: `They accused us of protocol violation: ${prologue.message}`,
               reason_class: FailureReason.ProtocolViolation,
@@ -444,7 +455,7 @@ class OpenAiConsumer extends Consumer {
               prologue.message,
             );
 
-            await this.failJob({
+            await this._rpc.consumerFailJob({
               database_job_id,
               reason: prologue.message ?? "Service error",
               reason_class: FailureReason.ServiceError,
@@ -456,13 +467,13 @@ class OpenAiConsumer extends Consumer {
             throw unreachable(prologue);
         }
 
-        console.debug("this.syncJob()...", {
+        console.debug("this._rpc.consumerSyncJob()...", {
           database_job_id,
           provider_job_id: prologue.provider_job_id,
           created_at_sync: prologue.created_at_sync,
         });
 
-        await this.syncJob({
+        await this._rpc.consumerSyncJob({
           database_job_id,
           provider_job_id: prologue.provider_job_id,
           created_at_sync: prologue.created_at_sync,
@@ -502,7 +513,7 @@ class OpenAiConsumer extends Consumer {
                     v.flatten(openaiChunk.issues),
                   );
 
-                  await this.failJob({
+                  await this._rpc.consumerFailJob({
                     database_job_id,
                     reason: `Invalid OpenAI stream chunk: ${JSON.stringify(
                       v.flatten(openaiChunk.issues),
@@ -539,7 +550,7 @@ class OpenAiConsumer extends Consumer {
                 if (!usage) {
                   console.warn("[Protocol] Missing usage in the response");
 
-                  await this.failJob({
+                  await this._rpc.consumerFailJob({
                     database_job_id,
                     reason: `Usage is missing`,
                     reason_class: FailureReason.ProtocolViolation,
@@ -566,7 +577,7 @@ class OpenAiConsumer extends Consumer {
                     their: streamChunk.balance_delta,
                   });
 
-                  await this.failJob({
+                  await this._rpc.consumerFailJob({
                     database_job_id,
                     reason: `Balance delta mismatch (ours: ${
                       balanceDelta
@@ -604,7 +615,7 @@ class OpenAiConsumer extends Consumer {
                     }`,
                   );
 
-                  await this.failJob({
+                  await this._rpc.consumerFailJob({
                     database_job_id,
                     reason: `Invalid public payload (${publicPayloadError})`,
                     reason_class: FailureReason.ProtocolViolation,
@@ -620,7 +631,7 @@ class OpenAiConsumer extends Consumer {
                 // Success!
                 //
 
-                await this.completeJob({
+                await this._rpc.consumerCompleteJob({
                   balance_delta: streamChunk.balance_delta,
                   database_job_id,
                   public_payload: streamChunk.public_payload,
@@ -634,7 +645,7 @@ class OpenAiConsumer extends Consumer {
                 // NOTE: It may take long time.
                 // TODO: Allow confirming directly via current connection.
                 // BUG: Catch `ProviderUnreacheable` error.
-                await this.confirmJobCompletion({
+                await this._rpc.consumerConfirmJobCompletion({
                   database_job_id,
                 });
 
@@ -652,7 +663,7 @@ class OpenAiConsumer extends Consumer {
               case undefined:
                 console.warn("Provider closed stream prematurely");
 
-                await this.failJob({
+                await this._rpc.consumerFailJob({
                   database_job_id,
                   reason: `Provider closed stream prematurely`,
                   reason_class: FailureReason.ServiceError,
@@ -676,7 +687,7 @@ class OpenAiConsumer extends Consumer {
           if (responseCbor === undefined) {
             console.warn("Provider did not respond");
 
-            await this.failJob({
+            await this._rpc.consumerFailJob({
               database_job_id,
               reason: `Provider did not respond`,
               reason_class: FailureReason.ServiceError,
@@ -693,7 +704,7 @@ class OpenAiConsumer extends Consumer {
               v.flatten(completion.issues),
             );
 
-            await this.failJob({
+            await this._rpc.consumerFailJob({
               database_job_id,
               reason: `Provider sent invalid completion object: ${JSON.stringify(
                 v.flatten(completion.issues),
@@ -713,7 +724,7 @@ class OpenAiConsumer extends Consumer {
           if (!completion.output.usage) {
             console.warn("[Protocol] Missing usage in the response");
 
-            await this.failJob({
+            await this._rpc.consumerFailJob({
               database_job_id,
               reason: `Usage is missing`,
               reason_class: FailureReason.ProtocolViolation,
@@ -733,7 +744,7 @@ class OpenAiConsumer extends Consumer {
           if (!epilogue) {
             console.warn("[Protocol] Missing epilogue");
 
-            await this.failJob({
+            await this._rpc.consumerFailJob({
               database_job_id,
               reason: `Epilogue is missing`,
               reason_class: FailureReason.ProtocolViolation,
@@ -760,7 +771,7 @@ class OpenAiConsumer extends Consumer {
               their: epilogue.balance_delta,
             });
 
-            await this.failJob({
+            await this._rpc.consumerFailJob({
               database_job_id,
               reason: `Balance delta mismatch (ours: ${
                 balanceDelta
@@ -798,7 +809,7 @@ class OpenAiConsumer extends Consumer {
               }`,
             );
 
-            await this.failJob({
+            await this._rpc.consumerFailJob({
               database_job_id,
               reason: `Invalid public payload (${publicPayloadError})`,
               reason_class: FailureReason.ProtocolViolation,
@@ -811,7 +822,7 @@ class OpenAiConsumer extends Consumer {
             return;
           }
 
-          await this.completeJob({
+          await this._rpc.consumerCompleteJob({
             database_job_id,
             balance_delta: epilogue.balance_delta,
             public_payload: epilogue.public_payload,
@@ -825,7 +836,7 @@ class OpenAiConsumer extends Consumer {
           // NOTE: It may take long time.
           // TODO: Allow confirming directly via current connection.
           // BUG: Catch `ProviderUnreacheable` error.
-          await this.confirmJobCompletion({
+          await this._rpc.consumerConfirmJobCompletion({
             database_job_id,
           });
 
@@ -857,10 +868,6 @@ class OpenAiConsumer extends Consumer {
     res.status(503).json({ error: "Could not complete the request" });
   }
 }
-
-dbMigrated.promise.then(() => {
-  new OpenAiConsumer({}, config.rpc.host, config.rpc.port).run();
-});
 
 function validatateCompletionsPublicPayload(
   publicPayloadString: string,
@@ -987,3 +994,7 @@ function validatateChatCompletionsPublicPayload(
 
   return null;
 }
+
+dbMigrated.promise.then(() => {
+  new OpenAiConsumer(config);
+});

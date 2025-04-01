@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { Transaction } from "../../drizzle.js";
+import { type Transaction } from "../../drizzle.js";
 
 export default async function up(tx: Transaction) {
   await tx.run(sql`

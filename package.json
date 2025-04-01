@@ -41,7 +41,7 @@
     "typescript": "^5.8.2"
   },
   "dependencies": {
-    "@derouter/consumer": "file:../consumer",
+    "@derouter/rpc": "file:../rpc-js",
     "@derouter/protocol-openai": "file:../protocol-openai",
     "@ethersproject/bignumber": "^5.8.0",
     "body-parser": "^2.2.0",

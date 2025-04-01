@@ -46,7 +46,7 @@ export const d = {
   ...pick(schema, ["activeServiceConnections", "offerSnapshots", "providers"]),
 };
 
-import { Deferred } from "@derouter/consumer/util";
+import { Deferred } from "@derouter/rpc/util";
 import createProviders from "./drizzle/migrations/001_createProviders.js";
 import createOfferSnapshots from "./drizzle/migrations/002_createOfferSnapshots.js";
 import createActiveServiceConnections from "./drizzle/migrations/003_createActiveServiceConnections.js";
