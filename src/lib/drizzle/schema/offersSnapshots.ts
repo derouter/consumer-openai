@@ -10,6 +10,7 @@ import {
 } from "drizzle-orm/sqlite-core";
 import { sortByKey } from "../../util.js";
 import { activeServiceConnections } from "./activeServiceConnections.js";
+import { jobs } from "./jobs.js";
 import { providers } from "./providers.js";
 
 export const offerSnapshots = sqliteTable(
@@ -104,5 +105,6 @@ export const offerSnapshotRelations = relations(
     }),
 
     activeServiceConnections: many(activeServiceConnections),
+    jobs: many(jobs),
   }),
 );

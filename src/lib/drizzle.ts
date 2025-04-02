@@ -1,3 +1,4 @@
+import { Deferred } from "@derouter/rpc/util";
 import { drizzle } from "drizzle-orm/sqlite-proxy";
 import { DatabaseSync } from "node:sqlite";
 import * as schema from "./drizzle/schema.js";
@@ -43,13 +44,18 @@ const db = drizzle<typeof schema>(
 
 export const d = {
   db,
-  ...pick(schema, ["activeServiceConnections", "offerSnapshots", "providers"]),
+  ...pick(schema, [
+    "activeServiceConnections",
+    "jobs",
+    "offerSnapshots",
+    "providers",
+  ]),
 };
 
-import { Deferred } from "@derouter/rpc/util";
 import createProviders from "./drizzle/migrations/001_createProviders.js";
 import createOfferSnapshots from "./drizzle/migrations/002_createOfferSnapshots.js";
 import createActiveServiceConnections from "./drizzle/migrations/003_createActiveServiceConnections.js";
+import createJobs from "./drizzle/migrations/004_createJobs.js";
 
 export const dbMigrated = new Deferred<true>();
 
@@ -58,6 +64,7 @@ d.db
     await createProviders(tx);
     await createOfferSnapshots(tx);
     await createActiveServiceConnections(tx);
+    await createJobs(tx);
   })
   .then(() => {
     console.debug("Migrated DB");

@@ -1,12 +1,12 @@
 import * as openai from "@derouter/protocol-openai";
 import {
-  Auth,
   ConsumerOpenConnectionError,
   RPC,
-  type OfferRemovedData,
-  type OfferUpdatedData,
-  type ProviderHeartbeatData,
-  type ProviderUpdatedData,
+  type JobRecord,
+  type OfferRemoved,
+  type OfferSnapshot,
+  type ProviderHeartbeat,
+  type ProviderRecord,
 } from "@derouter/rpc";
 import { readCborOnce, unreachable, writeCbor } from "@derouter/rpc/util";
 import bodyParser from "body-parser";
@@ -119,14 +119,223 @@ class OpenAiConsumer {
   private _rpc: RPC;
 
   constructor(config: v.InferOutput<typeof ConfigSchema>) {
-    this._rpc = new RPC(config.rpc.host, config.rpc.port, Auth.Consumer);
+    this._rpc = new RPC(config.rpc.host, config.rpc.port);
+
     this._rpc.emitter.on("providerUpdated", (e) => this.onProviderUpdated(e));
     this._rpc.emitter.on("providerHeartbeat", (e) =>
       this.onProviderHeartbeat(e),
     );
     this._rpc.emitter.on("offerUpdated", (e) => this.onOfferUpdated(e));
     this._rpc.emitter.on("offerRemoved", (e) => this.onOfferRemoved(e));
-    this._rpc.consumerConfig({}).then(() => this.run());
+    this._rpc.emitter.on("jobUpdated", (e) => this.onJobUpdated(e));
+
+    this.sync().then(() => this.run());
+  }
+
+  private async sync() {
+    const { peer_id: peerId } = await this._rpc.querySystem();
+
+    const allJobs: Awaited<ReturnType<typeof this._rpc.queryJobs>> = [];
+    const providerPeerIds = new Set<string>();
+    const offerSnapshotIds = new Set<number>();
+
+    let queriedJobs;
+    do {
+      queriedJobs = await this._rpc.queryJobs({
+        database_row_id_cursor: queriedJobs?.at(-1)!.job_rowid,
+        consumer_peer_ids: [peerId],
+        protocol_ids: [openai.ProtocolId],
+        limit: 100,
+      });
+
+      queriedJobs
+        .map((j) => j.provider_peer_id)
+        .forEach((id) => providerPeerIds.add(id));
+
+      queriedJobs
+        .map((j) => j.offer_snapshot_rowid)
+        .forEach((id) => offerSnapshotIds.add(id));
+
+      allJobs.push(...queriedJobs);
+    } while (queriedJobs.length);
+
+    // Query active provider peer IDs.
+    //
+
+    (await this._rpc.queryActiveProviders()).forEach((id) =>
+      providerPeerIds.add(id),
+    );
+
+    // Query active offer records.
+    //
+
+    const allOffers = await this._rpc.queryActiveOffers({
+      protocol_ids: [openai.ProtocolId],
+    });
+
+    allOffers.forEach((offer) => {
+      // We don't need to query these records anymore.
+      offerSnapshotIds.delete(offer.snapshot_id);
+
+      // But we need its provider record.
+      providerPeerIds.add(offer.provider_peer_id);
+    });
+
+    // Query offer records.
+    //
+
+    {
+      const array = [...offerSnapshotIds.values()];
+      const batchSize = 50;
+
+      for (let i = 0; i < array.length; i += batchSize) {
+        const batch = array.slice(i, i + batchSize);
+
+        allOffers.push(
+          ...(await this._rpc.queryOfferSnapshots({
+            snapshot_ids: batch,
+          })),
+        );
+      }
+    }
+
+    // Query provider records.
+    //
+
+    const allProviders: Awaited<ReturnType<typeof this._rpc.queryProviders>> =
+      [];
+
+    {
+      const array = [...providerPeerIds.values()];
+      const batchSize = 50;
+
+      for (let i = 0; i < array.length; i += batchSize) {
+        const batch = array.slice(i, i + batchSize);
+
+        allProviders.push(
+          ...(await this._rpc.queryProviders({
+            provider_peer_ids: batch,
+          })),
+        );
+      }
+    }
+
+    // Insert everything into DB.
+    //
+
+    await d.db.transaction(async (tx) => {
+      for (const provider of allProviders) {
+        console.debug("Inserting", provider);
+
+        console.debug(
+          "Inserted",
+          (
+            await tx
+              .insert(d.providers)
+              .values({
+                peerId: provider.peer_id,
+                latestHeartbeatAt: provider.latest_heartbeat_at,
+              })
+              .returning()
+          )[0],
+        );
+      }
+
+      const failedOfferSnapshotIds = new Set<number>();
+
+      offerLoop: for (const offer of allOffers) {
+        console.debug("Inserting", offer);
+
+        const parseResult = v.safeParse(
+          openai.OfferPayloadSchema,
+          offer.protocol_payload,
+        );
+
+        if (!parseResult.success) {
+          console.error(
+            `Failed to parse protocol payload`,
+            v.flatten(parseResult.issues),
+          );
+
+          failedOfferSnapshotIds.add(offer.snapshot_id);
+          continue offerLoop;
+        }
+
+        const protocolPayload = parseResult.output;
+
+        console.debug(
+          "Inserted",
+          (
+            await tx
+              .insert(d.offerSnapshots)
+              .values({
+                id: offer.snapshot_id,
+                providerPeerId: offer.provider_peer_id,
+                providerOfferId: offer.offer_id,
+                protocolId: openai.ProtocolId,
+                protocolPayload,
+                active: offer.active,
+                modelId: protocolPayload.model_id,
+                contextSize: protocolPayload.context_size,
+                inputTokenPricePol: parseWeiToEth(
+                  protocolPayload.input_token_price.$pol,
+                ),
+                outputTokenPricePol: parseWeiToEth(
+                  protocolPayload.output_token_price.$pol,
+                ),
+              })
+              .returning()
+          )[0],
+        );
+      }
+
+      for (const job of allJobs) {
+        if (failedOfferSnapshotIds.has(job.offer_snapshot_rowid)) {
+          console.warn(
+            `Skipping job #${
+              job.job_rowid
+            } due to failed offer snapshot insertion`,
+          );
+
+          continue;
+        }
+
+        console.debug("Inserting", job);
+
+        console.debug(
+          "Inserted",
+          (
+            await tx
+              .insert(d.jobs)
+              .values({
+                id: job.job_rowid,
+                offerSnapshotId: job.offer_snapshot_rowid,
+                currency: job.currency,
+                balanceDelta: job.balance_delta,
+                publicPayload: job.public_payload,
+                privatePayload: job.private_payload,
+                reason: job.reason,
+                reasonClass: job.reason_class,
+                createdAtLocal: job.created_at_local,
+                createdAtSync: job.created_at_sync,
+                completedAtLocal: job.completed_at_local,
+                completedAtSync: job.completed_at_sync,
+                signatureConfirmedAtLocal: job.signature_confirmed_at_local,
+                confirmationError: job.confirmation_error,
+              })
+              .returning()
+          )[0],
+        );
+      }
+    });
+
+    this._rpc.subscribeToActiveOffers({ protocol_ids: [openai.ProtocolId] });
+    this._rpc.subscribeToActiveProviders();
+
+    this._rpc.subscribeToJobs({
+      protocol_ids: [openai.ProtocolId],
+      consumer_peer_ids: [peerId],
+    });
   }
 
   private async run() {
@@ -163,7 +372,7 @@ class OpenAiConsumer {
     });
   }
 
-  async onProviderUpdated(data: ProviderUpdatedData) {
+  async onProviderUpdated(data: ProviderRecord) {
     console.debug("Inserting", data);
 
     const result = await d.db
@@ -181,7 +390,7 @@ class OpenAiConsumer {
     console.debug("Inserted", result[0]);
   }
 
-  async onProviderHeartbeat(data: ProviderHeartbeatData) {
+  async onProviderHeartbeat(data: ProviderHeartbeat) {
     await d.db
       .update(d.providers)
       .set({ latestHeartbeatAt: data.latest_heartbeat_at })
@@ -190,12 +399,12 @@ class OpenAiConsumer {
     console.debug("Provider heartbeat", data);
   }
 
-  async onOfferUpdated(data: OfferUpdatedData) {
+  async onOfferUpdated(data: OfferSnapshot) {
     console.debug("onOfferUpdated", data);
 
     await d.db.transaction(async (tx) => {
       if (data.protocol_id !== openai.ProtocolId) {
-        console.debug("Skipped offer with protocol", data.protocol_id);
+        console.warn("Skipped offer with protocol", data.protocol_id);
         return;
       }
 
@@ -267,9 +476,9 @@ class OpenAiConsumer {
     });
   }
 
-  async onOfferRemoved(data: OfferRemovedData) {
+  async onOfferRemoved(data: OfferRemoved) {
     if (data.protocol_id !== openai.ProtocolId) {
-      console.debug("Skipped offer with protocol", data.protocol_id);
+      console.warn("Skipped offer with protocol", data.protocol_id);
       return;
     }
 
@@ -285,6 +494,10 @@ class OpenAiConsumer {
       );
 
     console.log("Removed offer", data);
+  }
+
+  async onJobUpdated(data: JobRecord) {
+    console.debug("onJobUpdated", data);
   }
 
   private async _completionImpl(
