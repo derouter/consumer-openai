@@ -28,7 +28,12 @@ const db = drizzle<typeof schema>(
       case "get": {
         const row = stmt.get(...params);
         // console.debug({ row });
-        return { rows: [Object.values(row as any)] };
+
+        if (row) {
+          return { rows: [Object.values(row as any)] };
+        } else {
+          return { rows: [] };
+        }
       }
 
       case "run":
