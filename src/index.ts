@@ -246,10 +246,17 @@ class OpenAiConsumer {
       offerLoop: for (const offer of allOffers) {
         console.debug("Inserting", offer);
 
-        const parseResult = v.safeParse(
-          openai.OfferPayloadSchema,
-          offer.protocol_payload,
-        );
+        let json;
+        try {
+          json = JSON.parse(offer.protocol_payload);
+        } catch (e) {
+          console.error(`Failed to JSON-parse protocol payload`, e);
+
+          failedOfferSnapshotIds.add(offer.snapshot_id);
+          continue offerLoop;
+        }
+
+        const parseResult = v.safeParse(openai.OfferPayloadSchema, json);
 
         if (!parseResult.success) {
           console.error(
@@ -408,10 +415,15 @@ class OpenAiConsumer {
         return;
       }
 
-      const parseResult = v.safeParse(
-        openai.OfferPayloadSchema,
-        data.protocol_payload,
-      );
+      let json;
+      try {
+        json = JSON.parse(data.protocol_payload);
+      } catch (e) {
+        console.error(`Failed to JSON-parse protocol payload`, e);
+        return;
+      }
+
+      const parseResult = v.safeParse(openai.OfferPayloadSchema, json);
 
       if (!parseResult.success) {
         console.error(
