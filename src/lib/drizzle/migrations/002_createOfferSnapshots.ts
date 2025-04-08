@@ -24,7 +24,9 @@ export default async function up(tx: Transaction) {
       protocol_id,
       provider_offer_id,
       protocol_payload
-    );
+    )
+    WHERE
+      active = 1;
   `);
 
   await tx.run(sql`
