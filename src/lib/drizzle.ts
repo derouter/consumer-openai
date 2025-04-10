@@ -30,7 +30,7 @@ const db = drizzle<typeof schema>(
         // console.debug({ row });
 
         if (row) {
-          return { rows: [Object.values(row as any)] };
+          return { rows: Object.values(row as any) };
         } else {
           return { rows: [] };
         }
@@ -49,18 +49,11 @@ const db = drizzle<typeof schema>(
 
 export const d = {
   db,
-  ...pick(schema, [
-    "activeServiceConnections",
-    "jobs",
-    "offerSnapshots",
-    "providers",
-  ]),
+  ...pick(schema, ["offerSnapshots", "providers"]),
 };
 
 import createProviders from "./drizzle/migrations/001_createProviders.js";
 import createOfferSnapshots from "./drizzle/migrations/002_createOfferSnapshots.js";
-import createActiveServiceConnections from "./drizzle/migrations/003_createActiveServiceConnections.js";
-import createJobs from "./drizzle/migrations/004_createJobs.js";
 
 export const dbMigrated = new Deferred<true>();
 
@@ -68,8 +61,6 @@ d.db
   .transaction(async (tx) => {
     await createProviders(tx);
     await createOfferSnapshots(tx);
-    await createActiveServiceConnections(tx);
-    await createJobs(tx);
   })
   .then(() => {
     console.debug("Migrated DB");

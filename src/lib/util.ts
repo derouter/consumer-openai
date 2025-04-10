@@ -45,3 +45,23 @@ export function sortByKey<T extends { [key: string]: any }>(
       return acc;
     }, {} as T);
 }
+
+export function safeTry<T>(
+  fn: () => T,
+): { success: true; output: T } | { success: false; error: any } {
+  try {
+    return { success: true, output: fn() };
+  } catch (e) {
+    return { success: false, error: e };
+  }
+}
+
+export async function safeTryAsync<T>(
+  p: PromiseLike<T>,
+): Promise<{ success: true; output: T } | { success: false; error: any }> {
+  try {
+    return { success: true, output: await p };
+  } catch (e) {
+    return { success: false, error: e };
+  }
+}
