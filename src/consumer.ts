@@ -535,7 +535,6 @@ export class OpenAiConsumer {
       }
 
       const jobConnection = jobConnectionResult.output;
-      console.debug(jobConnection);
       const { stream } = jobConnection;
 
       /**
@@ -633,7 +632,11 @@ export class OpenAiConsumer {
         // For the end-user, we're replicating OpenAI server-sent events.
         //
 
-        res.header("Content-Type", "text/event-stream");
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          Connection: "keep-alive",
+          "Cache-Control": "no-cache",
+        });
 
         const chunks: (
           | openai.completions.CompletionChunk
@@ -674,7 +677,7 @@ export class OpenAiConsumer {
                   reason_class: openai.ReasonClass.ProtocolViolation,
                 });
 
-                res.write(`event:\ndata: [DONE]\n\n`);
+                res.write(`data: [DONE]\n\n`);
                 res.end();
 
                 return;
@@ -686,9 +689,7 @@ export class OpenAiConsumer {
 
               chunks.push(openaiChunk.output);
 
-              res.write(
-                `event:\ndata: ${JSON.stringify(openaiChunk.output)}\n\n`,
-              );
+              res.write(`data: ${JSON.stringify(openaiChunk.output)}\n\n`);
 
               break;
             }
@@ -697,7 +698,7 @@ export class OpenAiConsumer {
               // Check usage.
               //
 
-              res.write(`event:\ndata: [DONE]\n\n`);
+              res.write(`data: [DONE]\n\n`);
               res.end();
 
               if (!usage) {
