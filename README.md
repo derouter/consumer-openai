@@ -1,5 +1,7 @@
 # DeRouter OpenAI consumer
 
+[![Build](https://github.com/derouter/consumer-openai/actions/workflows/build.yaml/badge.svg)](https://github.com/derouter/consumer-openai/actions/workflows/build.yaml)
+
 A [DeRouter](https://derouter.org) consumer module conforming the [OpenAI protocol](https://github.com/derouter/protocol-openai).
 
 It exposes a local OpenAI-compatible server which routes requests to the DeRouter network.
