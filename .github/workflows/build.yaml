@@ -1,14 +1,32 @@
 name: Node.js CI
 
-on: [push]
+on:
+  push:
+    branches:
+      - dev
+      - main
+
+    tags:
+      - "v*" # Trigger only when a tag starting with 'v' is pushed
+
+  pull_request:
 
 jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        OS:
+          - HOST: ubuntu-latest
+            COMPILE_SCRIPT_PATH: ./scripts/compile/linux.sh
+            BINARY_POSTFIX: linux-x86_64
+          - HOST: windows-latest
+            COMPILE_SCRIPT_PATH: ./scripts/compile/win32.ps1
+            BINARY_POSTFIX: win32-x86_64.exe
+          - HOST: macos-latest
+            COMPILE_SCRIPT_PATH: ./scripts/compile/darwin.sh
+            BINARY_POSTFIX: darwin-arm64
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.OS.HOST }}
 
     steps:
       - uses: actions/checkout@v4
@@ -21,3 +39,46 @@ jobs:
 
       - run: npm ci
       - run: npm run build --if-present
+
+      - name: Compile SEA
+        run: ${{ matrix.OS.COMPILE_SCRIPT_PATH }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sea-${{ matrix.OS.HOST }}
+          path: dist/bin/output${{ matrix.OS.HOST == 'windows-latest' && '.exe' || '' }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded artifacts
+        run: ls -R $GITHUB_WORKSPACE/artifacts
+
+      - name: Rename artifacts
+        run: |
+          mv $GITHUB_WORKSPACE/artifacts/sea-ubuntu-latest/output      $GITHUB_WORKSPACE/artifacts/consumer-openai-linux-x86_64-${{ github.ref_name }}
+          mv $GITHUB_WORKSPACE/artifacts/sea-windows-latest/output.exe $GITHUB_WORKSPACE/artifacts/consumer-openai-win32-x86_64-${{ github.ref_name }}.exe
+          mv $GITHUB_WORKSPACE/artifacts/sea-macos-latest/output       $GITHUB_WORKSPACE/artifacts/consumer-openai-darwin-arm64-${{ github.ref_name }}
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create ${{ github.ref_name }}
+          -d
+          --generate-notes
+          $GITHUB_WORKSPACE/artifacts/consumer-openai-linux-x86_64-${{ github.ref_name }}
+          $GITHUB_WORKSPACE/artifacts/consumer-openai-win32-x86_64-${{ github.ref_name }}.exe
+          $GITHUB_WORKSPACE/artifacts/consumer-openai-darwin-arm64-${{ github.ref_name }}

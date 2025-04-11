@@ -18,12 +18,28 @@ npm start -- -c./config.json
 npm run dev -- -- -- -c./config.json
 ```
 
-## ⚒️ Compilation
+## 🚀 Releases
 
 The module may be compiled into a single binary with NodeJS's [SEA](https://nodejs.org/api/single-executable-applications.html).
-This feature is currently only available on MacOS.
+You can download a binary from the [Releases](https://github.com/derouter/consumer-openai/releases) page, or build it manually.
+
+### Linux
 
 ```sh
-./compile.sh
-./dist/bin/main -c./config.json
+./scripts/compile/linux.sh
+./dist/bin/output -c./config.json
+```
+
+### Windows
+
+```pwsh
+./scripts/compile/win32.ps1
+./dist/bin/output.exe -c ./config.json
+```
+
+### MacOS
+
+```sh
+./scripts/compile/darwin.sh
+./dist/bin/output -c./config.json
 ```
