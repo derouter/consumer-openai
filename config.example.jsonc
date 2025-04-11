@@ -1,0 +1,31 @@
+{
+  // OpenAI-compatible server settings.
+  "server": {
+    "port": 9002, // Server will be available at http://127.0.0.1:9002/v1.
+
+    // Models served by the OpenAI-compatible endpoints.
+    "models": {
+      "kunoichi": {
+        "minContextSize": 4096,
+
+        // Per 1M input tokens.
+        "maxInputPrice": {
+          // 20 ether.
+          "$pol": "20",
+        },
+
+        // Per 1M output tokens.
+        "maxOutputPrice": {
+          // 10 ether.
+          "$pol": "10",
+        },
+      },
+    },
+  },
+
+  // DeRouter RPC settings.
+  "rpc": {
+    "host": "127.0.0.1", // Default value.
+    "port": 4269, // Default value.
+  },
+}
