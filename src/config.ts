@@ -29,7 +29,6 @@ export const ConfigSchema = v.object({
         minContextSize: v.pipe(v.number(), v.integer(), v.minValue(1)),
         maxInputPrice: PriceSchema,
         maxOutputPrice: PriceSchema,
-        minTrialAllowance: v.optional(PriceSchema),
       }),
     ),
   }),
@@ -43,15 +42,5 @@ export const ConfigSchema = v.object({
       host: "127.0.0.1",
       port: 4269,
     },
-  ),
-
-  autoDeposit: v.optional(
-    v.record(
-      v.string(),
-      v.object({
-        treshold: v.string(),
-        amount: v.string(),
-      }),
-    ),
   ),
 });
